@@ -1,164 +1,251 @@
 # Movies Recommendations API
 
-A content-based movie recommendation API built with **NestJS**, **TypeORM**, **PostgreSQL**, and **pgvector**, using the **MovieLens latest-small** dataset.
+A content-based movie recommendation API built with **NestJS**, **TypeScript**, **PostgreSQL**, and **pgvector**. It recommends movies from the MovieLens dataset based on a user's preferred genres and uses a **Bayesian weighted rating** to break ties between equally similar movies.
 
-The API represents movies as 19-dimensional, multi-hot genre vectors and uses **cosine similarity** to retrieve relevant titles. A **Bayesian weighted rating** breaks ties in similarity, favoring ratings backed by more observations. This is a deterministic content-based recommender, **not a trained machine-learning model**.
+> **Project status:** educational MVP. Recommendations are computed using genre vectors and aggregate ratings; no machine-learning model has been trained yet.
 
 ## Features
 
-- Preference vectors with 19 genre weights between `0` and `1`.
-- Cosine similarity search using PostgreSQL's pgvector extension.
-- Bayesian weighted average (`m = 50`) to break similarity ties.
-- Input validation with `class-validator`.
-- Interactive Swagger documentation.
-- Jest unit tests for the NestJS API.
+- 19-dimensional genre embeddings (multi-hot vectors)
+- Cosine similarity search with pgvector
+- Bayesian weighted ratings as a tie-breaker, not a combined score
+- Input validation (19 genre weights between 0 and 1, at least one positive weight)
+- Swagger/OpenAPI documentation
+- Jest unit tests
+- MovieLens Small dataset: **9,742 movies** and **100,836 ratings**
 
-## Technology stack
+## Tech stack
 
-Node.js · TypeScript · NestJS · TypeORM · PostgreSQL 16 · pgvector · Docker Compose · pgAdmin 4 · Jest · Swagger/OpenAPI
+- Node.js and TypeScript
+- NestJS and TypeORM
+- PostgreSQL 16 + pgvector
+- Docker Compose and pgAdmin
+- Jest
 
 ## Project layout
 
+The following layout describes where the files need to be for the commands below. If you keep the seed files in a different directory, run the seed from that directory instead.
+
 ```text
 movies-recommendations/
-├── docker-compose.yaml       # PostgreSQL and pgAdmin containers
-├── api/                      # NestJS application (locate its package.json)
-└── README.md
+├── docker-compose.yaml
+├── db.js                    # Movie and rating seed script
+├── movies.csv               # Supplied MovieLens movie data
+├── ratings.csv              # Supplied MovieLens rating data
+└── api/
+    └── movies-recommendation/
+        ├── package.json
+        └── src/
 ```
 
-> **Repository note:** The root `package.json` is not the NestJS application manifest. Run npm commands from the folder that contains the API's `package.json` and its `test`, `start:dev`, and `build` scripts. In the original local workspace this was `api/movies-recommendation`; verify that path exists in your checkout.
+## 1. Prerequisites
 
-## Prerequisites
+Install:
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) with Docker Compose enabled.
-- [Node.js](https://nodejs.org/) and npm (use a current supported LTS version).
-- Git.
-- MovieLens **latest-small** dataset from [GroupLens](https://grouplens.org/datasets/movielens/latest/) (`movies.csv` and `ratings.csv`).
+- [Git](https://git-scm.com/)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with Docker Compose)
+- [Node.js](https://nodejs.org/) **22 or later** and npm
 
-## 1. Clone the repository
+Make sure ports **5432** (PostgreSQL), **5050** (pgAdmin), and **3000** (default API port) are available, or adjust your configuration accordingly.
+
+## 2. Clone the repository
 
 ```bash
 git clone https://github.com/willsgobi/movies-recommendations.git
 cd movies-recommendations
 ```
 
-## 2. Start PostgreSQL and pgAdmin with Docker
+## 3. Start PostgreSQL and pgAdmin with Docker
 
-The committed `docker-compose.yaml` defines:
+The repository's original `docker-compose.yaml` uses `postgres:16`. **That base image does not bundle pgvector.** For a fresh installation, change the PostgreSQL image to one that includes the extension:
 
-| Service | Container | Host port | Default credentials |
-| --- | --- | --- | --- |
-| PostgreSQL 16 | `postgres_local` | `5432` | user `postgres`, password `postgres`, database `movies_db` |
-| pgAdmin 4 | `pgadmin_local` | `5050` | email `admin@admin.com`, password `admin` |
+```yaml
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    # Keep the remaining service settings from docker-compose.yaml
+```
 
-From the repository root:
+The existing Compose configuration exposes:
+
+| Service | Host address / port | Credentials |
+| --- | --- | --- |
+| PostgreSQL | `localhost:5432` | `postgres` / `postgres` |
+| Database | `movies_db` | Created by `POSTGRES_DB` on first initialization |
+| pgAdmin | <http://localhost:5050> | `admin@admin.com` / `admin` |
+
+Start the containers from the repository root:
 
 ```bash
 docker compose up -d
+```
+
+Check their status:
+
+```bash
 docker compose ps
 ```
 
-Open pgAdmin at **http://localhost:5050** and sign in using the credentials above. Register a PostgreSQL server in pgAdmin with:
+> **Existing installations:** Switching images on an initialized database is not a data migration. Back up your database first and verify volume compatibility. Never delete the `data` directory or run destructive volume-reset commands against data you want to keep.
+>
+> These default credentials are intended for local development only.
 
-- **Host name/address:** `postgres` (the Docker Compose service name, **not** `localhost` from inside the pgAdmin container)
-- **Port:** `5432`
-- **Maintenance database:** `movies_db`
-- **Username:** `postgres`
-- **Password:** `postgres`
+### Optional: connect with pgAdmin
 
-### Important: pgvector is not included in the committed PostgreSQL image
+Open <http://localhost:5050>, log in, and register a server using **Host** `postgres` (the Compose service name), **Port** `5432`, **Username** `postgres`, **Password** `postgres`, and **Maintenance database** `movies_db`. From a process running on your host machine, use `localhost` instead of `postgres`.
 
-The current Compose file specifies `image: postgres:16`, which **does not install pgvector by default**. The project needs the `vector` extension for the `vector(19)` column and `<=>` cosine-distance operator.
+## 4. Enable pgvector and prepare the database schema
 
-For a **fresh local environment**, change the PostgreSQL service image in `docker-compose.yaml` to a PostgreSQL 16 image with pgvector preinstalled:
+**Important:** `db.js` imports the data and builds the 19-dimensional embeddings, but it **does not** install/enable pgvector or create the `movies` and `ratings` tables. These are one-time database prerequisites for a clean setup. You do **not** need to manually insert movie or rating rows.
 
-```yaml
-image: pgvector/pgvector:pg16
+Run the following schema initialization once, either through pgAdmin Query Tool connected to `movies_db`, or from a terminal:
+
+```bash
+docker exec -i postgres_local psql -U postgres -d movies_db
 ```
 
-Then start the containers using `docker compose up -d`. If you have **already initialized** `./data` with the plain PostgreSQL image, changing the image may require recreating the container; **do not delete the data directory or run `docker compose down -v` without a backup**. Preserve the database and verify image compatibility before making changes.
-
-In pgAdmin's Query Tool, connect to `movies_db` and run:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-SELECT extversion FROM pg_extension WHERE extname = 'vector';
-```
-
-If the first statement says the extension is unavailable, install/use a pgvector-enabled PostgreSQL image before proceeding.
-
-> **Security:** The credentials above are the example development credentials currently visible in the Compose file. Do not expose these containers to the public internet or reuse those passwords in production.
-
-## 3. Download the dataset
-
-Download and extract **ml-latest-small.zip** from [MovieLens](https://grouplens.org/datasets/movielens/latest/). You'll need:
-
-```text
-ml-latest-small/
-├── movies.csv    # movieId,title,genres
-└── ratings.csv   # userId,movieId,rating,timestamp
-```
-
-The dataset used to develop this project contains approximately **9,742 movies** and **100,836 ratings**. MovieLens may publish updated versions; counts can differ.
-
-## 4. Create the database tables
-
-Run the following SQL in pgAdmin's Query Tool on `movies_db`. The `movies` and `ratings` tables match the data used by the recommender. The staging tables simplify CSV import and vector generation.
+Paste the SQL below into `psql` (or run it in pgAdmin):
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS movies (
-    movie_id INTEGER PRIMARY KEY,
-    title TEXT NOT NULL,
-    genres TEXT[] NOT NULL,
-    embedding vector(19) NOT NULL
+    movie_id  INTEGER PRIMARY KEY,
+    title     TEXT NOT NULL,
+    genres    TEXT[] NOT NULL,
+    embedding VECTOR(19) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id INTEGER NOT NULL,
-    movie_id INTEGER NOT NULL REFERENCES movies(movie_id),
-    rating NUMERIC NOT NULL,
-    "timestamp" BIGINT NOT NULL
+    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id   INTEGER NOT NULL,
+    movie_id  INTEGER NOT NULL,
+    rating    NUMERIC NOT NULL,
+    timestamp BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_ratings_movie_id ON ratings(movie_id);
-
-CREATE TABLE IF NOT EXISTS movies_import (
-    "movieId" INTEGER,
-    title TEXT,
-    genres TEXT
-);
-
-CREATE TABLE IF NOT EXISTS ratings_import (
-    "userId" INTEGER,
-    "movieId" INTEGER,
-    rating NUMERIC,
-    "timestamp" BIGINT
-);
 ```
 
-**Note:** These are reproducibility instructions for a *fresh* database. They are not database migrations from the repository; review existing tables before running them against a database containing data.
+Enter `\q` to exit `psql`.
 
-## 5. Import the CSV files using pgAdmin
-
-1. In pgAdmin, expand `movies_db` → **Schemas** → **public** → **Tables**.
-2. Right-click **`movies_import`** → **Import/Export Data**.
-3. Select **Import**, choose `movies.csv`, select CSV format, and enable **Header**. Confirm the column mapping/order is `movieId`, `title`, `genres`.
-4. Repeat for **`ratings_import`** with `ratings.csv`, mapping `userId`, `movieId`, `rating`, `timestamp`.
-5. Check the staging row counts:
+Verify the extension:
 
 ```sql
-SELECT COUNT(*) AS imported_movies FROM movies_import;
-SELECT COUNT(*) AS imported_ratings FROM ratings_import;
+SELECT extname, extversion
+FROM pg_extension
+WHERE extname = 'vector';
 ```
 
-The CSV files are downloaded independently; they are not assumed to be committed to this repository.
+The development database was verified with **pgvector 0.8.7**. A new Docker image may bundle another compatible version.
 
-## 6. Generate the 19-dimensional movie embeddings
+> If `CREATE EXTENSION` fails because the `vector` control file is missing, pgvector is not installed in that PostgreSQL container. Check that the Compose image is `pgvector/pgvector:pg16` and that you are connected to the intended container.
 
-**Genre order is part of the API contract.** Index `0` is Action, index `18` is Western. Do not reorder the dimensions without regenerating all stored vectors.
+## 5. Seed movies, ratings, and embeddings
+
+The included `db.js` performs both data imports:
+
+1. Reads **`movies.csv`** from the current working directory.
+2. Converts each movie's genres into a **19-element binary embedding**.
+3. Inserts movie ID, title, genre array, and embedding into `movies`.
+4. Reads **`ratings.csv`** from the current working directory.
+5. Inserts user ID, movie ID, rating, and timestamp into `ratings`.
+
+The supplied CSV files are **already formatted for this script** (they have no header row). No separate CSV download, manual data import, or SQL `INSERT` statements are required.
+
+The script imports `pg-promise` and uses ES module syntax. From the directory containing **all three files** (`db.js`, `movies.csv`, `ratings.csv`), install its dependency if necessary:
+
+```bash
+npm install pg-promise
+```
+
+If the directory's `package.json` does not already declare ES module support, set it once:
+
+```bash
+npm pkg set type=module
+```
+
+Run the seed:
+
+```bash
+node db.js
+```
+
+**Seed database connection (currently hard-coded in `db.js`):**
+
+```text
+postgres://postgres:postgres@localhost:5432/movies_db
+```
+
+If your host, port, credentials, or database name differ, edit that connection string before running the script. The CSV paths are relative to the **directory you run `node` from**, not necessarily to the script location.
+
+**Important limitations of the current seed script:**
+
+- It performs ordinary `INSERT` statements and is **not idempotent**. Run it once against empty tables; running it again will conflict with existing `movies.movie_id` values.
+- It inserts rows sequentially, so importing approximately 110,000 records may take time and produce extensive console output.
+- It does not create the schema, create the extension, or automatically recover from a partially completed import.
+
+### Verify the imported data
+
+In pgAdmin, or using `psql`, run:
+
+```sql
+SELECT COUNT(*) AS movies_count FROM movies;
+SELECT COUNT(*) AS ratings_count FROM ratings;
+SELECT movie_id, title, genres, embedding FROM movies LIMIT 5;
+```
+
+Expected counts for the supplied CSVs:
+
+| Table | Expected rows |
+| --- | ---: |
+| `movies` | 9,742 |
+| `ratings` | 100,836 |
+
+The original MovieLens data contains **34 movies without a listed genre**. Their embeddings contain only zeros and are excluded from cosine similarity searches.
+
+## 6. Configure the NestJS API
+
+Go to the API directory:
+
+```bash
+cd api/movies-recommendation
+npm install
+```
+
+Ensure the TypeORM database configuration matches the local database:
+
+```text
+host: localhost
+port: 5432
+username: postgres
+password: postgres
+database: movies_db
+```
+
+Use the configuration mechanism already implemented in the API (for example, environment variables or the TypeORM module options). The seed's hard-coded connection string does **not** configure the API automatically.
+
+## 7. Start the API
+
+From `api/movies-recommendation`:
+
+```bash
+npm run start:dev
+```
+
+The API normally runs at <http://localhost:3000>. If your application uses a different port or global prefix, use that value in the following examples.
+
+## 8. Explore the API with Swagger
+
+Open:
+
+<http://localhost:3000/api/docs>
+
+Find **POST `/recommendations`**. The documentation includes the 19 genre positions and the request/response models.
+
+### Genre vector order
+
+**Do not change this order** without regenerating the movie embeddings.
 
 | Index | Genre | Index | Genre |
 | ---: | --- | ---: | --- |
@@ -173,104 +260,27 @@ The CSV files are downloaded independently; they are not assumed to be committed
 | 8 | Fantasy | 18 | Western |
 | 9 | Film-Noir | | |
 
-Import each movie, convert the pipe-separated genre text to an array, and build a binary vector in the fixed order:
+Each weight is between `0` and `1`; at least one weight must be greater than zero.
 
-```sql
-WITH genre_dimensions AS (
-    SELECT genre, ordinal_position
-    FROM unnest(ARRAY[
-        'Action', 'Adventure', 'Animation', 'Children', 'Comedy',
-        'Crime', 'Documentary', 'Drama', 'Fantasy', 'Film-Noir',
-        'Horror', 'IMAX', 'Musical', 'Mystery', 'Romance',
-        'Sci-Fi', 'Thriller', 'War', 'Western'
-    ]::TEXT[]) WITH ORDINALITY AS g(genre, ordinal_position)
-),
-movie_vectors AS (
-    SELECT
-        mi."movieId" AS movie_id,
-        mi.title,
-        string_to_array(mi.genres, '|') AS genres,
-        '[' || string_agg(
-            CASE WHEN gd.genre = ANY(string_to_array(mi.genres, '|'))
-                 THEN '1' ELSE '0' END,
-            ',' ORDER BY gd.ordinal_position
-        ) || ']' AS vector_text
-    FROM movies_import mi
-    CROSS JOIN genre_dimensions gd
-    GROUP BY mi."movieId", mi.title, mi.genres
-)
-INSERT INTO movies (movie_id, title, genres, embedding)
-SELECT movie_id, title, genres, vector_text::vector
-FROM movie_vectors
-ON CONFLICT (movie_id) DO UPDATE
-SET title = EXCLUDED.title,
-    genres = EXCLUDED.genres,
-    embedding = EXCLUDED.embedding;
+## 9. Test recommendations
+
+Request:
+
+```http
+POST /recommendations
+Content-Type: application/json
 ```
 
-MovieLens includes entries with `(no genres listed)`. Their binary vectors contain only zeros. These entries are retained for completeness, but excluded from cosine-similarity queries because they have no genre information.
+Body:
 
-## 7. Import ratings into the application table
-
-```sql
-INSERT INTO ratings (user_id, movie_id, rating, "timestamp")
-SELECT ri."userId", ri."movieId", ri.rating, ri."timestamp"
-FROM ratings_import ri
-JOIN movies m ON m.movie_id = ri."movieId"
-WHERE NOT EXISTS (
-    SELECT 1 FROM ratings r
-    WHERE r.user_id = ri."userId"
-      AND r.movie_id = ri."movieId"
-);
+```json
+{
+  "genres": [1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+  "limit": 10
+}
 ```
 
-For repeatable imports, consider a unique constraint on `(user_id, movie_id)` and an `ON CONFLICT` strategy. The query above prevents duplicates from a single existing import; do not treat it as a high-concurrency ingestion solution.
-
-Verify the results:
-
-```sql
-SELECT COUNT(*) AS total_movies FROM movies;
-SELECT COUNT(*) AS total_ratings FROM ratings;
-SELECT COUNT(*) AS searchable_movies FROM movies WHERE vector_norm(embedding) > 0;
-SELECT AVG(rating) AS global_average FROM ratings;
-```
-
-For the dataset used during development, these results were **9,742 movies**, **100,836 ratings**, **9,708 searchable movies**, and a global mean of approximately **3.501557**.
-
-## 8. Configure the NestJS API
-
-Locate the API's actual `package.json` (the original development path was `api/movies-recommendation`) and change to that directory:
-
-```bash
-cd api/movies-recommendation
-npm install
-```
-
-The API must connect to the **host** PostgreSQL port `5432` when running directly on your computer. Typical local connection parameters are:
-
-| Setting | Local value |
-| --- | --- |
-| Host | `localhost` |
-| Port | `5432` |
-| Database | `movies_db` |
-| Username | `postgres` |
-| Password | `postgres` |
-
-**Check the actual TypeORM configuration in your checkout** for the supported environment variable names or connection method. If it uses environment variables, create the appropriate local `.env` file (do not commit it). Do not assume names such as `DB_HOST` are supported without checking the application's configuration.
-
-Start the development server:
-
-```bash
-npm run start:dev
-```
-
-By default, a NestJS application listens at **http://localhost:3000** unless a different port is configured.
-
-## 9. Try the recommendation endpoint
-
-**Endpoint:** `POST /recommendations`
-
-The following example sends five active genres (Action, Animation, Crime, Drama, Thriller) and requests 10 results:
+Try it directly in Swagger, or use curl:
 
 ```bash
 curl -X POST http://localhost:3000/recommendations \
@@ -278,19 +288,7 @@ curl -X POST http://localhost:3000/recommendations \
   -d '{"genres":[1,0,1,0,0,1,0,1,0,0,0,0,0,0,0,0,1,0,0],"limit":10}'
 ```
 
-**Windows PowerShell:** use `curl.exe` (not the `curl` alias), or use `Invoke-RestMethod`:
-
-```powershell
-$body = @{
-    genres = @(1,0,1,0,0,1,0,1,0,0,0,0,0,0,0,0,1,0,0)
-    limit = 10
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri 'http://localhost:3000/recommendations' `
-    -Method Post -ContentType 'application/json' -Body $body
-```
-
-**Example response (abbreviated):**
+An abbreviated example response (values shown for illustration):
 
 ```json
 [
@@ -306,103 +304,83 @@ Invoke-RestMethod -Uri 'http://localhost:3000/recommendations' `
 ]
 ```
 
-The exact JSON property names depend on the current response DTO and mapping in the checked-out source. The example above reflects the `camelCase` mapping used during development.
+The API returns an array of movies, ordered first by **cosine similarity**, then by **Bayesian weighted rating** when similarity values are equal. Your output may differ if the database or implementation changes.
 
-### Input validation
+### Test request validation
 
-- `genres` must contain **exactly 19** numeric weights between `0` and `1`.
-- At least one weight must be greater than zero.
-- `limit` must be an integer between `1` and `50`.
+Try a vector of 19 zeros or an array with fewer than 19 entries. The configured validation should return **HTTP 400** instead of running a cosine similarity search with an invalid vector.
 
-Try sending 19 zeros to check that the endpoint rejects the request with **HTTP 400 Bad Request**. Validation requires the NestJS `ValidationPipe` to be enabled.
+## 10. How recommendation ranking works
 
-## 10. How results are ranked
+**Candidate retrieval:** Convert genre preferences into a vector, exclude zero-magnitude movie embeddings, and retrieve the most similar movies using pgvector cosine distance (`<=>`).
 
-Each movie stores a 19-dimensional vector. For a preference vector `p` and a movie vector `v`:
+**Tie-breaking:** For movies with equal cosine similarity, rank by the Bayesian weighted rating:
 
 ```text
-similarity = 1 - cosine_distance(p, v)
+weighted_rating = (v * R + m * C) / (v + m)
 ```
 
-The Bayesian weighted rating is:
+Where:
 
-```text
-WR = (vote_count * average_rating + m * global_average) / (vote_count + m)
-m = 50
-```
+- `R`: the movie's average rating
+- `v`: number of ratings for the movie
+- `C`: global average across all ratings
+- `m`: smoothing constant (`50` in this project)
 
-The SQL uses the following ranking priority:
+A movie with no ratings receives the global average as its Bayesian score. A movie with very few ratings is pulled toward the global average, so a single high rating does not dominate ties.
 
-1. **Cosine similarity descending** — most genre-relevant first.
-2. **Bayesian weighted rating descending** — used **only to break similarity ties**.
-3. **Movie ID ascending** — deterministic final tie-break.
+The implementation retrieves candidates first and then applies the rating tie-breaker. **Candidate selection can affect which tied movies are eligible**; inspect the API's actual SQL when comparing candidate limits or `FETCH FIRST ... WITH TIES` behavior.
 
-A movie without ratings has `averageRating: null`, `ratingCount: 0`, and a Bayesian rating equal to the global average. A Bayesian rating is **not** a probability that someone will like the movie.
+## 11. Run automated tests
 
-> **Candidate-selection caveat:** The project experimented with a `LIMIT 100` candidate pool and `FETCH FIRST 100 ROWS WITH TIES`. Check the currently committed query before claiming that every movie tied at the cutoff is included. If `WITH TIES` is used, ordering by a unique `movie_id` alongside similarity defeats the intended similarity-only tie expansion. For that behavior, use `ORDER BY similarity DESC FETCH FIRST 100 ROWS WITH TIES` in the candidates CTE.
-
-## 11. Swagger / OpenAPI documentation
-
-With the API running, open:
-
-**http://localhost:3000/api/docs**
-
-The Swagger UI documents the request body, response model, genre positions, and validation rules when the relevant decorators are present. Use **Try it out** → **Execute** to test `POST /recommendations` without a separate API client.
-
-## 12. Run tests
-
-From the NestJS application directory:
+From the API directory:
 
 ```bash
 npm run test
 ```
 
-Run serially for easier debugging:
+To run Jest serially:
 
 ```bash
 npm run test -- --runInBand
 ```
 
-Additional scripts included in the NestJS project:
+Other available scripts include:
 
 ```bash
-npm run test:watch   # Watch mode
-npm run test:cov     # Coverage report
-npm run build        # Production build
+npm run test:watch
+npm run test:cov
 ```
 
-During development, the Jest suite had **three passing suites and six passing tests**, including service instantiation, query parameter forwarding, numeric response conversion, and handling movies with no ratings.
+The project currently includes service, controller, and application test suites. Unit tests mock the repository; they do **not** execute the pgvector query against PostgreSQL. Integration testing is a future improvement.
 
-**Testing scope:** The repository mock in the unit tests does **not** execute PostgreSQL SQL or validate cosine ranking/Bayesian aggregation in the database. Those require integration tests against a populated test database.
-
-## 13. Stop or restart the containers
+## 12. Stop the containers
 
 From the repository root:
 
 ```bash
-docker compose stop        # Stop without deleting containers
-docker compose start       # Start existing containers
-docker compose down        # Remove containers and network; preserve bind-mounted data
-docker compose up -d       # Create/start again
+docker compose down
 ```
 
-**Never delete `./data` unless you intend to lose the database.** The Compose file mounts PostgreSQL data from the repository's `./data` directory.
+This stops/removes the containers while preserving the local bind-mounted database files. Avoid deleting the `data` and `pgadmin` directories unless you intentionally want to remove their persisted state.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| `extension "vector" is not available` | The default `postgres:16` image lacks pgvector; use a pgvector-enabled image. |
-| Database connection refused | Docker Desktop is running, containers are healthy, port `5432` is free, and TypeORM points to the right host. |
-| pgAdmin cannot connect | From the pgAdmin container, use host `postgres`, not `localhost`. |
-| API returns no movies | Confirm both CSV imports and generated `embedding` values. |
-| `npm error Missing script: test` | Run npm from the **NestJS package directory**, not the repository root. |
-| Jest cannot resolve `src/...` | Configure Jest `moduleNameMapper` for `^src/(.*)$` → `<rootDir>/$1` when `rootDir` is `src`. |
-| Jest cannot inject `MovieRepository` | Register a mock provider using `getRepositoryToken(Movie)` in the testing module. |
-| Empty or zero genre vector rejected | Supply at least one positive genre weight. |
+| `extension "vector" is not available` | The running PostgreSQL image must contain pgvector; use `pgvector/pgvector:pg16` for a fresh installation. |
+| `relation "movies" does not exist` | The schema initialization in Step 4 has not been run in `movies_db`. |
+| `duplicate key value violates unique constraint` | The seed has already inserted some movies. It is not safe to rerun against populated tables without first reconciling the data. |
+| `Cannot find package 'pg-promise'` | Run `npm install pg-promise` in the directory that contains `db.js`. |
+| `ENOENT: ... movies.csv` | Run `node db.js` from the directory containing the CSV files. |
+| `ECONNREFUSED` or authentication failure | Verify Docker services, the database connection string, and credentials. |
+| Swagger URL does not load | Verify the configured API port and `SwaggerModule.setup(...)` path. |
+| Jest cannot resolve `src/...` | Check `moduleNameMapper` in the API's Jest configuration. |
 
-## Dataset and credits
+## Data attribution
 
-Data: [MovieLens — GroupLens Research](https://grouplens.org/datasets/movielens/latest/). Please follow the dataset's terms and attribution requirements.
+Movie metadata and ratings come from the [MovieLens datasets](https://grouplens.org/datasets/movielens/) maintained by GroupLens. Refer to the original dataset's terms and citation guidance before redistributing it.
 
-Project: [willsgobi/movies-recommendations](https://github.com/willsgobi/movies-recommendations).
+## Repository
+
+<https://github.com/willsgobi/movies-recommendations>
