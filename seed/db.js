@@ -74,8 +74,6 @@ async function seedMovies() {
         console.log({ movieIdInsert, titleInsert, genresInsert, embeddingInsert });
 
         await db.result(`INSERT INTO movies (movie_id, title, genres, embedding) VALUES (${movieIdInsert}, '${titleInsert}', string_to_array('${genresInsert}'::text, ','::text), ('[${genreVector}]'))`);
-
-        //console.log({ movieId, movieName, movieGenres, genreVector });
     }
 }
 
@@ -102,5 +100,9 @@ async function seedRatings() {
     console.log(total);
 }
 
+async function seedAsync() {
+    await seedMovies();
+    await seedRatings();
+}
 
-seedRatings();
+seedAsync()
